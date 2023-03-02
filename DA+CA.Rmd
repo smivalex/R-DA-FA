@@ -1,0 +1,436 @@
+---
+title: "Time"
+author: "Ivan"
+date: "2022-12-08"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(matrixStats)
+library(ggplot2)
+library(GGally)
+library(ppcor)
+library(Hmisc)
+library(corrplot)
+library(nortest)
+library(stats)
+library(moments)
+```
+
+
+## Классификация:
+
+## Выбор данных
+
+```{r}
+library("xlsx")
+df <- read.xlsx(file = "MetroCommutes.xlsx", sheetIndex = 1)
+df <- df[-1]
+head(df)
+```
+
+
+Просматривание пределов данных:
+```{r}
+summary(df)
+```
+
+## Описание данных
+
+City:
+Города, в которых проводились исследования - Бостон, Хьюстон, Миннеаполис
+
+Distance:
+Расстояние поездки на работу (в милях)
+
+Time:
+Время в пути (в минутах)
+
+## Pairs
+
+```{r}
+num_col <- c("Distance","Time")
+f <- ggpairs(df, columns = num_col,  diag = list(diag = list(continuous = "densityDiag", discrete = "blankDiag", na = "blankDiag")), cardinality_threshold=NULL, mapping = aes(color = df$City, alpha = 0.8))
+print(f)
+```
+Видим, что распределения имеют хвосты вправо, необходимо пролагорифмировать.
+
+## Логарифмируем
+
+```{r}
+df$Distance = log(df$Distance)
+df$Time = log(df$Time)
+
+
+
+
+f <- ggpairs(df, columns = num_col,  diag = list(diag = list(continuous = "densityDiag", discrete = "blankDiag", na = "blankDiag")), cardinality_threshold=NULL, mapping = aes(color = df$City, alpha = 0.8))
+print(f)
+```
+
+```{r}
+df <- df %>% filter(df$Distance != "-Inf")
+```
+
+## PCA
+
+Посмотрим на данные в плоскости первых двух главных компанент, для этого:
+
+```{r}
+library("FactoMineR")
+result.pca = PCA(df, scale.unit=TRUE, ncp=2,quali.sup=1, graph=F)
+```
+Посмотрим на собственные числа, дисперсию и накопленную дисперсию соотвественно для каждой главной компаненты:
+
+```{r}
+result.pca$eig
+```
+
+```{r}
+library("factoextra")
+fviz_eig(result.pca, addlabels = TRUE)
+```
+
+Вывод собственных векторов $U_i$:
+
+```{r}
+result.pca$svd$V
+```
+
+```{r}
+fviz_pca_biplot(result.pca, repel = TRUE,habillage = 1,
+                col.var = "#B22222", 
+                col.ind = "#008000"
+                )
+```
+
+На графике индивидов в плоскости первых двух главных компанент замечаем, что красные и зеленые точки в большинстве смещены вправо от множества синих точек. Можно предположить, что индивиды из Минеаполиса будут хорошо отличны от индививидов их Бостона и Хьюстона.
+
+Также по форме распределений видим, что ковариационные матрицы классов отличаются (видим по разному наклону и ширине). Значит, теоретически, модель LDA не подходит.
+
+
+Далее посмотрим на критерии Роя и Вилкса, для проверки гипотезы о том, что группы неразделимы:
+
+```{r}
+library(MASS)
+
+df[2:3] <- scale(df[2:3])
+
+set.seed(13)
+
+Sample <- sample(c(TRUE,FALSE), nrow(df), replace=TRUE, prob =c(0.8,0.2))
+train <- df[Sample,]
+test <- df[!Sample,]
+
+
+train.manova <- manova(cbind(Distance, Time) ~ City, data = train) 
+
+summary(train.manova, 'Wilks')  
+summary(train.manova, 'Roy')  
+```
+
+По значениям лямбд Вилкса (0.9) и Роя (0.1) можем сделать вывод о том, что скорее всего группы разделимы только по одной канонической переменной.
+
+## LDA
+```{r}
+LDAmodel <- lda(City~., data=train)
+LDAmodel
+LDAmodel_pred <- predict(LDAmodel, train)
+```
+
+В полученной модели приорные вероятности равны долям индивидов каждого класса по всей выборке.
+
+Выше мы создали модель линейного дискрименантного анализа. Причем видим, что по первой канонической переменной групыы отличаются на 0.96, а по второй, всего на 0.03.
+
+```{r}
+predicted <- predict (LDAmodel, test)
+head(predicted$posterior)
+mean(predicted$class==test$City)
+table(predicted$class, test$City)
+```
+
+Выше показаны результаты работы модели на test данных. По строкам отложены предсказанные значения, а по стобцам реальные. Видим, что лучше всего определяется Минеаполис. 
+
+Модель определяет город с точностью 0.4. Сравним этот показатель с приорными вероятностями - он больше. Значит полученная модель работает лучше, чем если бы мы просто случайным образом относили индивид к одному из трех классов (0.4 > 0.33)
+
+
+```{r}
+lda_plot <- cbind(train, predict(LDAmodel)$x)
+ggplot(lda_plot, aes (LD1, LD2)) + geom_point( aes (color = City))
+```
+
+
+## QDA
+
+```{r}
+QDAmodel <- qda(City~., data=train)
+QDAmodel
+```
+```{r}
+predicted <- predict (QDAmodel, test)
+head(predicted$posterior)
+mean(predicted$class==test$City)
+table(predicted$class, test$City)
+```
+
+Выше показаны результаты работы модели на test данных. По строкам отложены предсказанные значения, а по стобцам реальные. Видим, что лучше всего определяется Минеаполис. 
+
+Модель определяет город с точностью 0.37, что хуже, чем в случае LDA. А значит, хоть теоретически модель LDA нельзя применять к таким данным, однако, она работает точнее.
+
+## ROC и AUC для LDA
+
+Ниже представлена ROC кривая для train LDA
+
+```{r}
+
+train <- dplyr::filter(train, City %in% c("Boston","Minneapolis"))
+test <- dplyr::filter(test, City %in% c("Boston","Minneapolis"))
+
+LDAmodel <- lda(City~., data=train)
+LDAmodel
+LDAmodel_pred <- predict(LDAmodel, train)
+
+predicted <- predict (LDAmodel, test)
+head(predicted$posterior)
+mean(predicted$class==test$City)
+table(predicted$class, test$City)
+
+library(ROCR)
+
+pred <- prediction(LDAmodel_pred$posterior[,2], train$City)
+perf <- performance(pred,"tpr","fpr")
+plot(perf,colorize=FALSE)
+AUC <- performance(pred,"auc")
+abline(a = 0, b = 1)
+text(x=0.85, y=0.15, paste("AUC = ", round(AUC@y.values[[1]],5)))
+```
+
+Ниже представлена ROC кривая для test LDA
+
+```{r}
+pred <- prediction(predicted$posterior[,2], test$City)
+perf <- performance(pred,"tpr","fpr")
+plot(perf,colorize=FALSE)
+AUC <- performance(pred,"auc")
+abline(a = 0, b = 1)
+text(x=0.85, y=0.15, paste("AUC = ", round(AUC@y.values[[1]],5)))
+```
+
+## ROC и AUC для QDA
+
+Ниже представлена ROC кривая для train QDA
+
+```{r}
+QDAmodel <- qda(City~., data=train)
+QDAmodel
+QDAmodel_pred <- predict(QDAmodel, train)
+
+predicted <- predict (QDAmodel, test)
+head(predicted$posterior)
+mean(predicted$class==test$City)
+table(predicted$class, test$City)
+
+library(ROCR)
+
+pred <- prediction(QDAmodel_pred$posterior[,2], train$City)
+perf <- performance(pred,"tpr","fpr")
+plot(perf,colorize=FALSE)
+AUC <- performance(pred,"auc")
+abline(a = 0, b = 1)
+text(x=0.85, y=0.15, paste("AUC = ", round(AUC@y.values[[1]],5)))
+```
+
+Ниже представлена ROC кривая для test QDA
+
+```{r}
+pred <- prediction(predicted$posterior[,2], test$City)
+perf <- performance(pred,"tpr","fpr")
+plot(perf,colorize=FALSE)
+AUC <- performance(pred,"auc")
+abline(a = 0, b = 1)
+text(x=0.85, y=0.15, paste("AUC = ", round(AUC@y.values[[1]],5)))
+```
+
+Видим, что AUC для test QDA меньше, чем для test LDA, значит LDA лучше определяет тип данных.
+
+## Кластерный анализ:
+
+## Выбор данных
+
+```{r}
+library("xlsx")
+df <- read.xlsx(file = "Trees.xlsx", sheetIndex = 1)
+df$bladelen <- as.double(df$bladelen)
+df$petiole <- as.double(df$petiole)
+df$bladewid <- as.double(df$bladewid)
+df$latitude <- as.double(df$latitude)
+df$logwid <- as.double(df$logwid)
+df$logpet <- as.double(df$logpet)
+df$loglen <- as.double(df$loglen)
+df <- df[-1]
+df$location <- NULL
+df$latitude <- NULL
+df$arch <- as.factor(df$arch)
+head(df)
+```
+
+## Описание данных
+
+bladelen - длина листа (мм)
+
+petiole - длина черенка
+
+bladewid - ширина листа (мм)
+
+logwid - логарифм ширины листа
+
+logpet - логарифм длины черенка
+
+loglen - логарифм длины листа
+
+arch - тип листа (0 = плагиотропная, 1 = ортотропная)
+
+## Визуализация данных
+
+```{r}
+summary(df)
+```
+
+```{r}
+num_col <- c("bladelen","petiole","bladewid","logwid","logpet","loglen")
+f <- ggpairs(df, columns = num_col,  diag = list(diag = list(continuous = "densityDiag", discrete = "blankDiag", na = "blankDiag")), cardinality_threshold=NULL, mapping = aes(color = df$arch, alpha = 0.8))
+print(f)
+```
+
+```{r}
+num_col <- c("logwid","logpet","loglen")
+f <- ggpairs(df, columns = num_col,  diag = list(diag = list(continuous = "densityDiag", discrete = "blankDiag", na = "blankDiag")), cardinality_threshold=NULL, mapping = aes(color = df$arch, alpha = 0.8))
+print(f)
+```
+
+Оставляем только логарифмированные размеры, тип листьев и страну.
+
+```{r}
+library("data.table")
+logdf <- data.frame(logwid = df$logwid, logpet = df$logpet, loglen = df$loglen, arch=  df$arch )
+summary(logdf)
+```
+
+## АГК
+
+Посмотрим на данные в плоскости первых двух ГК:
+
+```{r}
+PCAdf <- data.frame(logwid = df$logwid, logpet = df$logpet, loglen = df$loglen, arch=  df$arch)
+library("FactoMineR")
+result.pca = PCA(logdf, scale.unit=TRUE, ncp=2,quali.sup=4, graph=F)
+```
+
+```{r}
+result.pca$eig
+```
+
+```{r}
+library("factoextra")
+fviz_eig(result.pca, addlabels = TRUE)
+```
+
+Вывод собственных векторов $U_i$:
+
+```{r}
+result.pca$svd$V
+```
+
+```{r}
+fviz_pca_biplot(result.pca, repel = TRUE,habillage = 4,
+                col.var = "#B22222", 
+                col.ind = "#008000"
+                )
+```
+
+Видим, что данные представляю собой неоднородность, представляющую собой слияние двух облаков индивидов.
+
+Стандартизуем данные:
+
+```{r}
+logdf.scale <- mutate(logdf, logwid = scale(logdf$logwid), 
+                      logpet = scale(logdf$logpet), 
+                      loglen = scale(logdf$loglen))
+
+logdf$arch <- as.factor(logdf$arch)
+
+d <- dist(logdf.scale[,1:3])
+```
+
+## Дендрограммы
+
+Построим дендограммы:
+
+```{r}
+library(plotly)
+library(ggdendro)
+library(ggplot2)
+library(fastcluster)
+library(dendextend)
+
+logdf.hc.single <- hclust(d, method = 'single')
+logdf.hc.complete <- hclust(d, method = 'complete')
+
+ids <- as.numeric(factor(logdf$arch, 
+                  levels=unique(logdf$arch)))
+
+
+plot(logdf.hc.single, hang = -1, labels = logdf$arch, main = 'Single')
+plot(logdf.hc.complete, hang = -1, labels = logdf$arch, main = 'Complete')
+```
+
+На графике single видим неопределяемое число кластеров.
+
+На графике complete видим 3 кластера.
+
+## Model-based
+
+Воспользуемся информационным критерием для выбора модели Model-based:
+
+```{r}
+library(mclust)
+BIC <- mclustBIC(logdf.scale[,1:3])
+BIC
+plot(BIC)
+```
+
+Видим, что находится 2 кластера, выбираем самую простую модель, определяющую 2 кластера - VVE
+
+Построим график, иллюстрирующий, как индивиды кластеризуются: 
+
+```{r}
+opt.model <- Mclust(data = logdf.scale[,1:3], modelNames = 'VVE')
+plot(opt.model, what = 'classification')
+```
+
+## K-means
+
+Воспользуемся методом К-средних, указывая, что хотим распознать 2 кластера:
+
+```{r}
+logdf.km <- kmeans(logdf.scale[, 1:3], 2)
+table(logdf$arch, logdf.km$cluster)
+```
+
+Видим, что к первому классу отнеслось по 40 индивидов каждого класса. Второй класстер же включает в себя 96 индивидов 0 класса, и всего 9 индивидов 1 класса.
+
+Построим график pairs с разделением по кластерам:
+
+```{r}
+logdf[, 1:3] %>% mutate(cluster = logdf.km$cluster) %>%
+  ggpairs(aes(color = factor(cluster), alpha = 0.5), diag = list(continuous = wrap("barDiag", alpha = 0.5, bins = 10)), 
+          upper = list(continuous = wrap("cor", size = 2.5))) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+По выведенным выше pairs можно сказать, что класетризация, по сути своей, представляет сигментацию (распределение будто бы просто поделено пополам), которая совпала с распределением реальных классов.
